@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Factory Energy Optimization</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
+  body {
+    margin: 0;
+    font-family: 'Roboto', sans-serif;
+    background: linear-gradient(135deg, #1f4037, #99f2c8);
+    color: #222;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+  header {
+    background-color: rgba(255, 255, 255, 0.8);
+    padding: 1rem 2rem;
+    box-shadow: 0 2px 4px rgb(0 0 0 / 0.1);
+    text-align: center;
+    font-weight: 700;
+    font-size: 1.6rem;
+    color: #1f4037;
+  }
+  main {
+    flex: 1;
+    padding: 1rem 2rem 3rem;
+    max-width: 960px;
+    margin: 0 auto;
+    background: rgba(255,255,255,0.9);
+    border-radius: 15px;
+    box-shadow: 0 10px 50px rgba(0,0,0,0.15);
+    display: flex;
+    flex-direction: column;
+  }
+  #chart-container {
+    position: relative;
+    height: 350px;
+    margin-bottom: 2rem;
+  }
+  .stats {
+    display: flex;
+    justify-content: space-around;
+    flex-wrap: wrap;
+    gap: 1rem;
+  }
+  .stat-card {
+    background: #1f4037;
+    color: #99f2c8;
+    padding: 1rem 1.5rem;
+    border-radius: 10px;
+    flex: 1 1 220px;
+    box-shadow: 0 5px 15px rgba(0,0,0,0.25);
+    font-weight: 700;
+    text-align: center;
+  }
+  .stat-card .value {
+    font-size: 1.8rem;
+    margin-top: 0.3rem;
+  }
+  footer {
+    text-align: center;
+    padding: 0.7rem 1rem;
+    background: rgba(255,255,255,0.8);
+    font-size: 0.9rem;
+    color: #555;
+  }
+  button#simulate-btn {
+    background-color: #1f4037;
+    color: #99f2c8;
+    border: none;
+    padding: 0.8rem 1.5rem;
+    font-size: 1rem;
+    border-radius: 8px;
+    cursor: pointer;
+    margin: 1rem auto 0;
+    display: block;
+    transition: background-color 0.3s ease;
+  }
+  button#simulate-btn:hover {
+    background-color: #356a4a;
+  }
+</style>
+</head>
+<body>
+<header>
+  Factory Energy Optimization Simulator
+</header>
+<main>
+  <section id="chart-container">
+    <canvas id="energyChart"></canvas>
+  </section>
+  <section class="stats">
+    <div class="stat-card">
+      Baseline Energy Usage<br /><span id="baselineEnergy" class="value">-- kWh</span>
+    </div>
+    <div class="stat-card">
+      Optimized Energy Usage<br /><span id="optimizedEnergy" class="value">-- kWh</span>
+    </div>
+    <div class="stat-card">
+      Energy Saved<br /><span id="energySaved" class="value">-- kWh</span>
+    </div>
+    <div class="stat-card">
+      Savings Percentage<br /><span id="savingsPercent" class="value">-- %</span>
+    </div>
+  </section>
+  <button id="simulate-btn" title="Run Simulation Again">Run New Simulation</button>
+</main>
+<footer>
+  &copy; 2024 Factory Energy Optimization. All rights reserved.
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+  // Utility function to generate linear space array
+  function linspace(start, end, num) {
+    const arr = [];
+    const step = (end - start) / (num - 1);
+    for(let i = 0; i < num; i++) {
+      arr.push(start + step * i);
+    }
+    return arr;
+  }
+  // Utility random uniform in range
+  function randUniform(min, max, size=1) {
+    const res = [];
+    for(let i=0; i<size; i++) {
+      res.push(Math.random() * (max-min) + min);
+    }
+    return size === 1 ? res[0] : res;
+  }
+
+  // Helper for date formatting
+  function formatHourDate(date) {
+    return date.toISOString().slice(5,16).replace('T', ' ');
+  }
+
+  // Generate hourly timestamps for 14 days
+  function generateTimestamps() {
+    const timestamps = [];
+    const startDate = new Date("2025-01-01T00:00:00Z");
+    for(let i=0; i<24*14; i++) {
+      const d = new Date(startDate.getTime() + i*3600000);
+      timestamps.push(d);
+    }
+    return timestamps;
+  }
+
+  // Sinusoidal external temperature
+  function externalTemperature(hour) {
+    return 5 + 5 * Math.sin(2*Math.PI * hour / 24);
+  }
+
+  // Occupancy (high during 8-20h)
+  function occupancyLevel(hour) {
+    if(hour >= 8 && hour <= 20) {
+      return randUniform(0.6, 1.0);
+    } else {
+      return randUniform(0.0, 0.3);
+    }
+  }
+
+  // Solar availability (9-17h)
+  function solarAvailability(hour) {
+    if(hour >= 9 && hour <= 17) {
+      return randUniform(0.5, 1.0);
+    }
+    return 0;
+  }
+
+  // Isolation Forest approximation for machine A idle detection
+  // Since true IF is complex, we'll apply a heuristic:
+  // idle if occupancy < 0.3 and machine_A power > 0, randomly with 10% chance
+  function machineAIdleFlag(machinePower, occupancy) {
+    // Predict idle if occupancy low and power > 0, with 10% chance for demo
+    if(occupancy < 0.3 && machinePower > 0) {
+      return Math.random() < 0.10;
+    }
+    return false;
+  }
+
+  // HVAC expected usage linear regression approximation
+  // Regression: hvac_power = a*external_temperature + b*occupancy + c
+  // We'll fit it on the fly similarly to the Python code for demo:
+  // For demo, derive coefficients using artificial data:
+  // Use a = abs ~ 0.9, b = 4.5, c=5 as rough approximation from data distribution
+  function predictHVAC(externalTemp, occupancy) {
+    return 5 + Math.abs(externalTemp - 22) * occupancy; // same as baseline formula
+  }
+
+  // Main simulation function
+  function simulate() {
+    const timestamps = generateTimestamps();
+    const data = [];
+    for(let i=0; i<timestamps.length; i++) {
+      const timestamp = timestamps[i];
+      const hour = timestamp.getUTCHours();
+
+      const external_temperature = externalTemperature(hour);
+      const occupancy_level = occupancyLevel(hour);
+      const solar_availability = solarAvailability(hour);
+
+      // Machine power
+      const machine_A_power = 10; // always on
+
+      const machine_B_power = (hour >= 9 && hour <= 21) ? 8 : 0;
+      const machine_C_power = (hour >= 9 && hour <= 18) ? 6 * occupancy_level : 0;
+
+      // HVAC power
+      const hvac_power = 5 + (Math.abs(external_temperature - 22) * occupancy_level);
+
+      // Lighting power
+      const lighting_power = 2 * occupancy_level;
+
+      // Total baseline energy
+      const total_energy_baseline = machine_A_power + machine_B_power + machine_C_power + hvac_power + lighting_power;
+
+      // Machine A idle detection simulation
+      const machine_A_idle = machineAIdleFlag(machine_A_power, occupancy_level);
+
+      // HVAC expected usage (for simplicity same formula)
+      const hvac_expected = predictHVAC(external_temperature, occupancy_level);
+
+      // HVAC overuse
+      const hvac_overuse = hvac_power > hvac_expected * 1.2;
+
+      // Optimization logic
+      const machine_A_optimized = machine_A_idle ? 0 : machine_A_power;
+
+      const hvac_optimized = (Math.abs(external_temperature - 22) < 3 && occupancy_level < 0.3)
+                             ? hvac_power * 0.5
+                             : hvac_power;
+
+      const machine_B_optimized = solar_availability > 0.5 ? 8 : 0;
+
+      const machine_C_optimized = machine_C_power;
+
+      const lighting_optimized = lighting_power;
+
+      const total_energy_optimized = machine_A_optimized + machine_B_optimized + machine_C_optimized + hvac_optimized + lighting_optimized;
+
+      const energy_saved = total_energy_baseline - total_energy_optimized;
+
+      data.push({
+        timestamp,
+        hour,
+        external_temperature,
+        occupancy_level,
+        solar_availability,
+        machine_A_power,
+        machine_B_power,
+        machine_C_power,
+        hvac_power,
+        lighting_power,
+        total_energy_baseline,
+        machine_A_idle,
+        hvac_expected,
+        hvac_overuse,
+        machine_A_optimized,
+        hvac_optimized,
+        machine_B_optimized,
+        machine_C_optimized,
+        lighting_optimized,
+        total_energy_optimized,
+        energy_saved,
+      });
+    }
+    return data;
+  }
+
+  // Initialize chart variable globally
+  let energyChart;
+
+  function renderChart(data) {
+    const sample = data.slice(0, 24*3); // first 3 days (72 hours)
+    const labels = sample.map(d => formatHourDate(d.timestamp));
+    const baselineData = sample.map(d => d.total_energy_baseline);
+    const optimizedData = sample.map(d => d.total_energy_optimized);
+
+    const ctx = document.getElementById('energyChart').getContext('2d');
+    if (energyChart) {
+      energyChart.destroy();
+    }
+    energyChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: 'Baseline',
+            data: baselineData,
+            borderColor: '#e74c3c',
+            backgroundColor: 'rgba(231, 76, 60, 0.2)',
+            fill: true,
+            tension: 0.3,
+          },
+          {
+            label: 'Optimized',
+            data: optimizedData,
+            borderColor: '#27ae60',
+            backgroundColor: 'rgba(39, 174, 96, 0.2)',
+            fill: true,
+            tension: 0.3,
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        interaction: {
+          mode: 'nearest',
+          intersect: false,
+        },
+        plugins: {
+          legend: { position: 'top' },
+          tooltip: {
+            enabled: true,
+            mode: 'index',
+            intersect: false,
+          }
+        },
+        scales: {
+          x: {
+            display: true,
+            title: { display: true, text: 'Time' },
+            ticks: { maxRotation: 45, minRotation: 45 }
+          },
+          y: {
+            display: true,
+            title: { display: true, text: 'Energy (kWh)' },
+            beginAtZero: true,
+          }
+        }
+      }
+    });
+  }
+
+  function updateStats(data) {
+    const total_baseline = data.reduce((sum, d) => sum + d.total_energy_baseline, 0);
+    const total_optimized = data.reduce((sum, d) => sum + d.total_energy_optimized, 0);
+    const total_saved = total_baseline - total_optimized;
+    const savings_percent = (total_saved / total_baseline) * 100;
+
+    document.getElementById('baselineEnergy').textContent = total_baseline.toFixed(2) + ' kWh';
+    document.getElementById('optimizedEnergy').textContent = total_optimized.toFixed(2) + ' kWh';
+    document.getElementById('energySaved').textContent = total_saved.toFixed(2) + ' kWh';
+    document.getElementById('savingsPercent').textContent = savings_percent.toFixed(2) + ' %';
+  }
+
+  function runSimulation() {
+    const data = simulate();
+    renderChart(data);
+    updateStats(data);
+  }
+
+  // Initial run
+  runSimulation();
+
+  // Button event listener
+  document.getElementById('simulate-btn').addEventListener('click', () => {
+    runSimulation();
+  });
+</script>
+</body>
+</html>
+
